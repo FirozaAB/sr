@@ -7,7 +7,7 @@
  *
  * This file contains all the functions that interact directly
  * with the routing table, as well as the main entry method
- * for routing.
+ * for routing..
  *
  **********************************************************************/
 
