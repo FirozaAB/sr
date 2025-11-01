@@ -14,6 +14,7 @@
 /* Forward declarations */
 void handle_arpreq(struct sr_instance *sr, struct sr_arpreq *req);
 void handle_arpreq_no_destroy(struct sr_instance *sr, struct sr_arpreq *req);
+struct sr_rt* sr_longest_prefix_match(struct sr_instance* sr, uint32_t dest_ip);
 
 /* 
   This function gets called every second. For each request sent out, we keep
@@ -76,8 +77,24 @@ void handle_arpreq_no_destroy(struct sr_instance *sr, struct sr_arpreq *req) {
             /* Extract IP header to get source address */
             sr_ip_hdr_t *ip_hdr = (sr_ip_hdr_t *)(pkt->buf + sizeof(sr_ethernet_hdr_t));
             
-            /* Send ICMP host unreachable */
-            sr_send_icmp_unreachable(sr, pkt->buf, pkt->len, pkt->iface, ICMP_CODE_HOST_UNREACHABLE);
+            /* Find the correct interface to send ICMP error back to source */
+            /* We need to route back to the source, not use the original outgoing interface */
+            struct sr_rt* return_route = sr_longest_prefix_match(sr, ntohl(ip_hdr->ip_src));
+            char* error_interface = NULL;
+            
+            if (return_route) {
+                error_interface = return_route->interface;
+            } else {
+                /* No route back to source - use first available interface */
+                if (sr->if_list) {
+                    error_interface = sr->if_list->name;
+                }
+            }
+            
+            if (error_interface) {
+                /* Send ICMP host unreachable via the interface that can reach the source */
+                sr_send_icmp_unreachable(sr, pkt->buf, pkt->len, error_interface, ICMP_CODE_HOST_UNREACHABLE);
+            }
             
             pkt = pkt->next;
         }
@@ -121,55 +138,53 @@ void handle_arpreq_no_destroy(struct sr_instance *sr, struct sr_arpreq *req) {
 
 void sr_arpcache_sweepreqs(struct sr_instance *sr) { 
     /* 
-     * DEADLOCK AVOIDANCE STRATEGY:
-     * Instead of holding the lock while calling handle_arpreq (which may call sr_arpreq_destroy),
-     * we collect all requests that need processing first, then process them without holding the lock.
-     * This avoids the double-locking issue in sr_arpreq_destroy.
+     * RACE CONDITION SAFE STRATEGY:
+     * Process requests one at a time while maintaining them in the cache list
+     * to prevent duplicate requests. Only remove requests when they're truly finished.
      */
     
     pthread_mutex_lock(&(sr->cache.lock));
     
-    /* First pass: collect all requests that need processing into a temporary list */
-    struct sr_arpreq *req_list = NULL;
     struct sr_arpreq *req = sr->cache.requests;
+    time_t now = time(NULL);
     
     while (req) {
         struct sr_arpreq *next = req->next;
-        time_t now = time(NULL);
         
         /* Check if this request needs processing */
         if (req->sent == 0 || difftime(now, req->sent) > 1.0) {
-            /* Remove from cache list and add to our processing list */
-            if (req == sr->cache.requests) {
-                sr->cache.requests = next;
+            /* Update sent time to prevent reprocessing by other threads */
+            req->sent = now;
+            req->times_sent++;
+            
+            /* Make a copy of essential info for processing */
+            uint32_t target_ip = req->ip;
+            int times_sent = req->times_sent;
+            
+            /* Release lock temporarily for network operations */
+            pthread_mutex_unlock(&(sr->cache.lock));
+            
+            if (times_sent >= 5) {
+                /* Timeout - handle and destroy the request */
+                handle_arpreq_no_destroy(sr, req);
+                /* Note: handle_arpreq_no_destroy will call sr_arpreq_destroy which handles locking */
             } else {
-                /* Find previous node to update its next pointer */
-                struct sr_arpreq *prev = sr->cache.requests;
-                while (prev && prev->next != req) {
-                    prev = prev->next;
-                }
-                if (prev) {
-                    prev->next = next;
+                /* Send ARP request */
+                if (sr->if_list) {
+                    sr_send_arp_request(sr, target_ip, sr->if_list->name);
                 }
             }
             
-            /* Add to our processing list */
-            req->next = req_list;
-            req_list = req;
+            /* Reacquire lock and restart from beginning (list may have changed) */
+            pthread_mutex_lock(&(sr->cache.lock));
+            req = sr->cache.requests;
+            continue;
         }
         
         req = next;
     }
     
     pthread_mutex_unlock(&(sr->cache.lock));
-    
-    /* Second pass: process all collected requests without holding the cache lock */
-    req = req_list;
-    while (req) {
-        struct sr_arpreq *next = req->next;
-        handle_arpreq_no_destroy(sr, req);
-        req = next;
-    }
 }
 
 /* You should not need to touch the rest of this code. */

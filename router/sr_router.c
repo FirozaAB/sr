@@ -817,6 +817,12 @@ void sr_handle_arp_reply(struct sr_instance* sr, uint8_t* packet, unsigned int l
             sr_ethernet_hdr_t* eth_hdr = (sr_ethernet_hdr_t*)pkt->buf;
             memcpy(eth_hdr->ether_dhost, arp_hdr->ar_sha, ETHER_ADDR_LEN);
             
+            /* Fix source MAC: Update to the correct outgoing interface MAC */
+            struct sr_if* out_iface = sr_get_interface(sr, pkt->iface);
+            if (out_iface) {
+                memcpy(eth_hdr->ether_shost, out_iface->addr, ETHER_ADDR_LEN);
+            }
+            
             /* Send the packet */
             sr_send_packet(sr, pkt->buf, pkt->len, pkt->iface);
             pkt = pkt->next;
@@ -960,11 +966,8 @@ void sr_forward_ip_packet(struct sr_instance* sr, uint8_t* packet, unsigned int 
         return;
     }
 
-    /* Prevent forwarding back to the same interface (split horizon) */
-    if (strcmp(interface, route->interface) == 0) {
-        fprintf(stderr, "Dropping packet: would forward back to same interface %s\n", interface);
-        return;
-    }
+    /* Note: Removed split-horizon check - routers MUST be able to forward 
+     * packets out the same interface (e.g., default gateway scenarios) */
 
     /* Update IP header (decrement TTL, recompute checksum) */
     /* Make a copy of the packet since we need to modify it */
@@ -1017,7 +1020,8 @@ void sr_forward_ip_packet(struct sr_instance* sr, uint8_t* packet, unsigned int 
             free(packet_copy);
             return;
         }
-        /* Note: packet_copy is now owned by the ARP request queue, don't free it here */
+        /* ARP queue makes its own copy - we must free the original */
+        free(packet_copy);
     }
 }
 
