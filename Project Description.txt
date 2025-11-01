@@ -1,0 +1,89 @@
+Project Description:
+
+Using Mininet VM, build a simple router that receives ethernet frames, processes them, and routes them using a static routing table. 
+The network topology is as follows; We have 2 servers, connected to the router as so; HTTPServer 1 -> Router <- HTTPServer. We also have
+a single client which is also connected to the same router as so: Client -> Router. 
+
+Example:
+
+We are provided with 3 scripts: sr_solution, run_mininet, and run_pox. We start by starting run_mininet in one terminal, then start run_pox in another terminal and wait for it to connect.
+Then we open another terminal and we can use sr_solution to setup the router to see the expected behaviour. Once sr_solution is running, we can go back to the mininet terminl and run commands like ping, traceroute,
+and wget. Without sr_solution, we cannot; Our goal is to replicate the functionality of sr_solution.
+
+Required Functionality:
+
+1) Successfully route packets between internet and application servers.
+2) Handle ARP requests and replies
+3) Handle traceroutes through router (where router is not end host) and to it (where it is the end host)
+4) Respond to ICMP echo requests
+5) Maintain ARP cache with 15 second entry timeout
+6) Queue all packets waiting for outstanding ARP requests. Drop after 5 attempts and send ICMP host unreachable to sender(s)
+7) Router must not needlessly drop packets (e.g. when waiting for ARP reply)
+8) Enforce guaranteed response on ARP request timeout; If an ARP request is not responded to, the ICMP host unreachable message is sent even if no more packets arrive at the router (implement in sr_arpcache_sweepreqs)
+
+Logic:
+
+There are 2 main parts to this assignment: ARP handling and IP Forwarding.
+
+IP Forwarding:
+
+Assume we have received a frame containing a packet that is not destined for one of the router's interfaces;
+
+1) Sanity-check packet: Ensure minimum length and correct checksum
+2) Decrement TTL and recompute packet checksum over the modified header
+3) Using longest prefix matching, search the routing table and retrieve destination IP address
+4) Check ARP cache for next-hop MAC address corresponding to the next-hop IP
+	4a) If present, continue forwarding
+	4b) Else: Send ARP request for next-hop IP (if one hasn't been sent within last second), and add packet to queue of packets waiting on this ARP request.
+
+If error: Send ICMP back to sender notifying them of error.
+
+ARP:
+We must cache replies, and expire them after 15 seconds (already implemented). 
+When forwarding a packet to next-hop IP address, search ARP cache for next-hop MAC address corresponding to the next-hop IP before sending request.
+If cache miss:
+	1) Send ARP request once every second to target IP address
+	2) If no reply after 5 requests:
+		Send ICMP destination host unreachable to all source/sender IP address waiting on a reply to this ARP request
+
+Received ARP Requests and Replies:
+
+If request received: reply if target IP is one of the router's IP addresses. 
+If reply received: cache entry if target IP is one of the router's IP addresses.
+
+ARP requests use broadcast MAC address. Use provided ARP request queue to manage ARP request queue.
+
+IP Packet Destinations:
+
+If packet is destined for one of the two router addresses:
+	a) if packet is a valid ICMP echo request and checksum is valid: send an ICMP echo reply to the sender host
+	b) if packet contains TPD or UDP payload: Send ICMP port unreachable reply to the sender host. Otherwise ignore the packet.
+Packets going elsewhere should be routed using standard forwarding logic.
+
+ARP Cache and ARP Request Queue (sr_arpcache.c/h)
+
+When ARP response arrives: remove request from queue and update ARP cache, and forward all formerly waiting packets (Pseudocode in sr_arpcache.h)
+Starter code creates a thread that times out ARP entries after 15 seconds. 
+Need to implement: sr_arpcache_sweepreqs: iterate through ARP request queue every second and re-send requests if necessary (Pseudocode in sr_arpcache.h)
+
+Basic Functions:
+void sr_handlepacket; called by router when packet received (sr_router.c) (do not free buffer)
+int sr_send_packet; sneds arbitrary packet of length len using interface specified by char * iface (sr_vns_comm.c)
+
+Data Structures:
+
+Router: struct sr_instance (sr_router.h) - full context of router, including topology, routing table, and list of interfaces
+Interfaces: if_list (sr_if.ch) - Use provided utility methods
+Routing Table: routing_table (sr_rt.c/h) - Reads table from file and stores in linked list of routing entries in current routing instance
+
+Protocol Headers:
+
+See sr_protocol.h for data structures for manipulating headers.
+
+
+
+
+
+
+
+
